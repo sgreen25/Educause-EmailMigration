@@ -1,0 +1,87 @@
+STEP 1
+
+## -- STUDENT GET INITIAL LIST FROM SOURCE TENANT USING EMAILADDRESSES -- ##
+## -- ML.csv is a list of all email addresses you wish to migrate in this batch -- ##
+
+$list2=Import-Csv C:\Scripts\Migration_Setup\ML.csv
+
+$list=foreach ($user in $list2) {Get-Mailbox $user.Email|Select-Object Name, LegacyExchangeDN, ExchangeGuid, PrimarySmtpAddress}
+
+$list|export-csv C:\Scripts\Migration_Setup\admig.csv
+
+***-Remove "" from CSV
+
+
+
+STEP 2
+
+## -- LOCAL AD SCRIPT -- ##
+## -- Creates MailUser attributes for ADSync / Sets Attribute to Migration for grouping and licensing after migration completes -- ##
+
+$adprep=Import-Csv C:\Migrations\admig.csv
+
+
+Foreach ($user in $adprep) {
+$legacy="x500:"+$user.Legacy
+$tgt="SMTP:"+$user.Email
+$mail=$user.Email
+$UID=Get-ADUser -Properties * -Filter {mail -eq $mail}|Select-Object Name
+
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Set-Aduser -Add @{Proxyaddresses="smtp:"+$UID.Name+"@DESTTENANT.mail.onmicrosoft.com"}
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Set-Aduser -Add @{Proxyaddresses="smtp:"+$UID.Name+"@DESTTENANT.onmicrosoft.com"}
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Set-Aduser -Add @{Proxyaddresses=$legacy}
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Set-Aduser -Add @{MailNickName=$UID.Name}
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Set-Aduser -Add @{targetAddress="SMTP:"+$mail}
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Set-Aduser -Add @{extensionAttribute11="Migration"}
+}
+
+## -- Creates ExGuid.csv File -- ##
+
+$adinfo=Import-Csv C:\Migrations\admig.csv
+$UserList=Foreach ($user in $adinfo) {
+$mail=$user.Email
+$Exguid=$user.Exguid
+Get-ADUser -Properties * -Filter {mail -eq $mail} | Select-Object Name, EmployeeID,@{name='EXguid';expression={$Exguid}},mail, UserPrincipalName, MailNickName}
+
+$UserList | Export-CSV C:\Migrations\Exguid.csv
+
+
+STEP 3 
+
+## -- EAGLES.EWU.EDU TENANT SCRIPT -- #
+## -- Adds Users to z_MigrationGroup which authorizes migration connection -- #
+
+$Members=Import-CSV C:\Scripts\Migration_Setup\Exguid.csv
+$Group="z_MigrationGroup"
+
+$Pre=Get-DistributionGroupMember -Identity $Group -Resultsize Unlimited
+
+$Post=Get-DistributionGroupMember -Identity $Group -Resultsize Unlimited
+
+Foreach ($user in $Members) {
+$Name=$user.mail
+$Group="z_MigrationGroup"
+$Group2="RunningMigration"
+Add-DistributionGroupMember -Identity $Group -Member $Name
+Add-DistributionGroupMember -Identity $Group2 -Member $Name}
+
+
+STEP 4 **IF FEDERATED MUST WAIT FOR SYNC TO COMPLETE TO CREATE MAILUSERS**
+
+## -- DEST.EDU TENANT SCRIPT -- ##
+## -- Sets ExchangeGuid to match what comes from Student Tenant -- ##
+
+
+$Exguid=Import-Csv C:\Scripts\Migration_Setup\Exguid.csv
+
+$Get=Foreach ($user in $Exguid) {
+$Name=$user.Name
+$Exg=$user.Exguid
+Get-MailUser $Name |Select-Object Name, ExchangeGuid, RecipientType}
+
+$Set=Foreach ($user in $Exguid) {
+$Name=$user.Name
+$Exg=$user.Exguid
+$Mail=$user.UserPrincipalName
+Get-MailUser $Name|Set-MailUser -ExchangeGuid $Exg
+Request-SPOPersonalSite -UserEmails $Mail -Nowait}
